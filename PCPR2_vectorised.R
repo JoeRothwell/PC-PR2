@@ -1,4 +1,4 @@
-# Original script from Fages et al 2014
+# Vectorised script 2019
 # For the script to work, name your omics matrix X_DataMatrixScaled and your metadata Z_InterestFactors
 # The test data are already missing-free and scaled
 
@@ -21,103 +21,67 @@ library(tidyverse)
 
 # Load test data
 X_DataMatrixScaled <- readRDS("X_testdata.rds")
-Z_InterestFactors <- readRDS("Y_testdata.rds")
+Z_Meta <- readRDS("Y_testdata.rds")
 
-Z_InterestFactorsRowN <- nrow(Z_InterestFactors)
-Z_InterestFactorsColN <- ncol(Z_InterestFactors)
-ColNames <- names(Z_InterestFactors)
+Z_MetaRowN <- nrow(Z_Meta)
+Z_MetaColN <- ncol(Z_Meta)
+ColNames   <- names(Z_Meta)
 
 # Obtain eigenvectors
-pct_threshold = .8 # Amount of variability desired to be explained, to be edited with your preferences
-X_DataMatrixScaled_transposed = t(X_DataMatrixScaled)
-Mat2 <- X_DataMatrixScaled %*% X_DataMatrixScaled_transposed
-eigenData <- eigen(Mat2)
-eigenValues = eigenData$values
-ev_n <- length(eigenValues)
-eigenVectorsMatrix = eigenData$vectors
-eigenValuesSum = sum(eigenValues)
-percents_PCs = eigenValues /eigenValuesSum
+pct_threshold <- 0.8 # set variability desired to be explained
+X_DataMatrixScaled_t <- t(X_DataMatrixScaled)
+symMat <- X_DataMatrixScaled %*% X_DataMatrixScaled_t
+eigenData    <- eigen(symMat)
+eigenVal     <- eigenData$values
+eigenVecMat  <- eigenData$vectors
+percents_PCs <- eigenVal/sum(eigenVal)
 
 # Get number of PCs required for threshold (force min to 3)
-my_counter_2 = 0
-my_sum_2 = 1
-for (i in ev_n:1){
-  my_sum_2 = my_sum_2 - percents_PCs[i]
-  if ((my_sum_2) <= pct_threshold ){
-    my_counter_2 = my_counter_2 + 1
-  }
-}
-if (my_counter_2 < 3){ pc_n =3
-}else {
-  pc_n = my_counter_2
-}
-pc_data_matrix <- matrix(data = 0, nrow = (Z_InterestFactorsRowN*pc_n), ncol = 1)
-mycounter = 0
-for (i in 1:pc_n){
-  for (j in 1:Z_InterestFactorsRowN){
-    mycounter <- mycounter + 1                    
-    pc_data_matrix[mycounter,1] = eigenVectorsMatrix[j,i]
-  }
-}
-AAA <- Z_InterestFactors[rep(1:Z_InterestFactorsRowN,pc_n),]
-Data <- cbind(pc_data_matrix, AAA)
+my_counter_2 <- sum(1 - cumsum(rev(percents_PCs)) <= 0.8)
+if(my_counter_2 > 3) pc_n <- my_counter_2 else pc_n <- 3
+
+pc_data_matrix <- eigenVecMat[, 1:pc_n ]
 
 #Perform linear multiple regression models on each eigenvector with factors of interest as explanatory variables
 #Categorical variables should be processed by as.factor, whereas continuous variables should not. 
 #To be edited with your factors names
 
-DataCol <- ncol(Data)
-typeIIIMatrix <- matrix(data = 0, nrow = (pc_n), ncol = (DataCol) ) 
-ST_ResidualR2 <- matrix(data = 0, nrow = (pc_n), ncol = 2)  
+# Convert categorical variables to factors (put them in varlist)
+#varlist <- c("sex", "smoking.status")
+#Z_Meta <- Z_Meta %>% mutate_at(vars(varlist), as.factor)
 
-# Run type III ANOVA on each PC
-for (i in 1:pc_n){                                        
-  y = (((i-1)*Z_InterestFactorsRowN)+1)                                                                                                                      
-  TotSumSq <- var(Data[y:(((i- 1)*Z_InterestFactorsRowN)+Z_InterestFactorsRowN),1])*(Z_InterestFactorsRowN-1)
-  #Edit the linear model with your factors
-  Model <- lm(pc_data_matrix ~ sex + height + weight + smoking.status + age.sample, 
-              Data[y:(((i-1) * Z_InterestFactorsRowN) + Z_InterestFactorsRowN), ])
-  AnalysisVariance <- Anova(Model, type=c(3))
-  SumSq     <- AnalysisVariance[1] 
-  Residuals <- SumSq[DataCol + 1, ] 
-  RR <- Residuals/TotSumSq
-  R2 = 1 - RR
-  ST_ResidualR2[i,]   <- c(R2, RR)
-  ST_ResidualR2_Names <- c("ST_R2", "ST_Residuals")
-  colnames(ST_ResidualR2) = ST_ResidualR2_Names
-  for (j in 1:(DataCol)){
-    typeIIIMatrix[i,j] = as.numeric(SumSq[j + 1, 1])
-    typeIIIMatrixNames <- c(ColNames, "SumSqResiduals")
-    colnames(typeIIIMatrix) = typeIIIMatrixNames
-  } 
-}
+DataCol <- Z_MetaColN + 1
+
+# Run a linear model with each eigenvector as the response
+TotSumSq <- apply(pc_data_matrix, 2, var) * (Z_MetaRowN - 1)
+multifit <- lm(pc_data_matrix ~ ., data = Z_Meta)
+
+# Run type 3 ANOVA on each PC
+AnovaTab <- Anova(multifit, type=3, singular.ok = F)
+SSP      <- AnovaTab$SSP
+
+# Extract sum of squares for each factor, removing intercept column
+# Need to take the diagonal of each factor matrix to get sums of squares
+Residuals  <- diag(AnovaTab$SSPE)
+RR         <- Residuals/TotSumSq
+
+type3mat0 <- sapply(SSP, diag)[, -1]
+type3mat  <- cbind(type3mat0, "SumSqResiduals" = Residuals)
+ST_ResidualR2 <- cbind("ST_R2" = 1-RR, "ST_Residuals" = RR)
 
 #Create partial R2 matrix and weighted matrix
-partialR2Matrix <- matrix(data = 0, nrow = (pc_n), ncol = (DataCol-1) )
-for (i in 1:pc_n){
-  for (j in 1:(DataCol-1)){
-    partialR2Matrix[i,j] = typeIIIMatrix[i,j] / (typeIIIMatrix[i,(DataCol)] + typeIIIMatrix[i,j]) 
-  }
-}
+partialR2mat <- type3mat[, -DataCol] / (type3mat[, -DataCol] + type3mat[, DataCol])
+eigenVal     <- eigenVal[1:pc_n]
+weight       <- eigenVal/sum(eigenVal) 
 
-partialR2MatrixWtProp <- matrix(data = 0, nrow = (pc_n), ncol = (DataCol)) 
-for (i in 1:pc_n){
-  weight = eigenValues[i]/sum(eigenValues[1:pc_n]) 
-  for (j in 1:DataCol-1){
-    partialR2MatrixWtProp[i,j] = partialR2Matrix[i,j]*weight
-    partialR2MatrixWtProp[i,DataCol] = ST_ResidualR2[i,1]*weight 
-  }
-}
-
-pR2Sums <- colSums(partialR2MatrixWtProp)*100 
-plotnames = c( ColNames, "R2")
+partialR2MatWtProp <- cbind(partialR2mat, ST_ResidualR2[, 1]) * weight
+colnames(partialR2MatWtProp) <- NULL
+pR2Sums <- colSums(partialR2MatWtProp) * 100
 
 par(mfrow = c(1,2))
-bp <- barplot(pR2Sums, xlab = "", ylab = "Weighted Rpartial2", ylim = c(0,max(pR2Sums) * 1.3), 
-              col = c("red"), las=2, main = paste("Original PCPR2 n =", ev_n))
-axis(1, at = bp, labels = plotnames, cex.axis = 0.8, las=2) 
-values = pR2Sums
-new_values = round(values, 3)
-text(bp, pR2Sums, labels = new_values, pos=3, cex = 0.8)
-
-output <- data.frame(plotnames, pR2Sums)
+bp <- barplot(pR2Sums, ylab = "Weighted Rpartial2", ylim = c(0, max(pR2Sums) * 1.3), 
+              xlab = "", col = "red", las=2, 
+              main = paste("n =", Z_MetaRowN, ",", "Y-variables =", Z_MetaColN, ",", "components =", pc_n))
+axis(1, at = bp, labels = c(ColNames, "R2"), cex.axis = 0.8, las=2) 
+rounded <- round(pR2Sums, 3)
+text(bp, pR2Sums, labels = rounded, pos = 3, cex = 0.8)
