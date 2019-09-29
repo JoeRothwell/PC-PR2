@@ -1,6 +1,6 @@
 # Vectorised script 2019
 # For the script to work, name your omics matrix X_DataMatrixScaled and your metadata Z_meta
-# The test data already missing-free and scaled
+# The test data are already missing-free and scaled
 
 # The following packages are required:
 library(car)
